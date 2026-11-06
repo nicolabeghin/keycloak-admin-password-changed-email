@@ -1,0 +1,90 @@
+name: Build, test and release
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ '*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up JDK
+      uses: actions/setup-java@v5
+      with:
+        distribution: temurin
+        java-version: 21
+
+    - name: Check JDK version
+      run: java --version
+
+    - name: Cache Maven packages
+      uses: actions/cache@v6
+      with:
+        path: ~/.m2
+        key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+        restore-keys: ${{ runner.os }}-m2
+
+    - name: Check tag matches pom version
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        POM_VERSION="$(mvn --batch-mode -q -DforceStdout help:evaluate -Dexpression=project.version)"
+        if [ "$POM_VERSION" != "${GITHUB_REF_NAME}" ]; then
+          echo "Tag '${GITHUB_REF_NAME}' does not match pom version '${POM_VERSION}'" >&2
+          exit 1
+        fi
+
+    - name: Build with Maven
+      run: mvn --batch-mode --update-snapshots package
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: provider-jar
+        path: target/keycloak-admin-password-changed-email-*.jar
+
+  e2e:
+    name: End-to-end test
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 15
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Download provider jar
+      uses: actions/download-artifact@v8
+      with:
+        name: provider-jar
+        path: target
+
+    - name: Run e2e test (Keycloak + Mailpit in Docker)
+      run: test/e2e.sh
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [ build, e2e ]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+    - name: Download provider jar
+      uses: actions/download-artifact@v8
+      with:
+        name: provider-jar
+        path: target
+
+    - name: Release
+      uses: softprops/action-gh-release@v3
+      with:
+        files: target/keycloak-admin-password-changed-email-*.jar
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
